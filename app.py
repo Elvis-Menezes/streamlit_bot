@@ -3,7 +3,7 @@ Multi-Agent Chatbot Application
 A Streamlit-based chatbot with three specialized agents:
 - ShopBot (E-commerce)
 - FinanceBot (Stock Market)
-- SkyWatch (Weather)
+- SkyWatch (Weather) - with MCP Weather Server integration
 
 Author: Built with Cursor AI
 """
@@ -13,9 +13,95 @@ import asyncio
 import json
 import os
 import inspect
+import logging
+import atexit
 from openai import OpenAI
 
 from agents import AGENTS, TOOLS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# MCP Server Initialization (Weather & Stock)
+# =============================================================================
+
+@st.cache_resource
+def initialize_mcp_weather_client():
+    """
+    Initialize the MCP Weather Client as a singleton resource.
+    Uses @st.cache_resource to ensure only one instance across reruns.
+    
+    Returns:
+        MCPWeatherClient instance or None if unavailable
+    """
+    try:
+        from mcp_client import get_weather_client
+        client = get_weather_client()
+        logger.info("MCP Weather Client initialized successfully")
+        return client
+    except ImportError as e:
+        logger.warning(f"MCP Weather Client not available (missing dependencies): {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize MCP Weather Client: {e}")
+        return None
+
+
+@st.cache_resource
+def initialize_mcp_stock_client():
+    """
+    Initialize the MCP Stock Client as a singleton resource.
+    Uses @st.cache_resource to ensure only one instance across reruns.
+    
+    Returns:
+        MCPStockClient instance or None if unavailable
+    """
+    try:
+        from mcp_client import get_stock_client
+        client = get_stock_client()
+        logger.info("MCP Stock Client initialized successfully")
+        return client
+    except ImportError as e:
+        logger.warning(f"MCP Stock Client not available (missing dependencies): {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize MCP Stock Client: {e}")
+        return None
+
+
+def cleanup_mcp_clients():
+    """Cleanup MCP clients on application shutdown."""
+    try:
+        from mcp_client import shutdown_weather_client
+        shutdown_weather_client()
+        logger.info("MCP Weather Client shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during MCP Weather client cleanup: {e}")
+    
+    try:
+        from mcp_client.stock_client import shutdown_stock_client
+        shutdown_stock_client()
+        logger.info("MCP Stock Client shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during MCP Stock client cleanup: {e}")
+
+
+# Register cleanup function
+atexit.register(cleanup_mcp_clients)
+
+# Initialize MCP clients (will be cached)
+_mcp_weather_client = initialize_mcp_weather_client()
+_mcp_stock_client = initialize_mcp_stock_client()
+
+# Inject stock client into stock agent
+try:
+    from agents.stock import set_stock_client
+    set_stock_client(_mcp_stock_client)
+    logger.info("MCP Stock Client injected into stock agent")
+except Exception as e:
+    logger.error(f"Failed to inject stock client: {e}")
 
 # =============================================================================
 # Page Configuration
@@ -104,6 +190,25 @@ st.markdown("""
         color: #666;
         padding: 20px;
         font-size: 0.9em;
+    }
+    
+    /* MCP status indicator */
+    .mcp-status {
+        padding: 5px 10px;
+        border-radius: 15px;
+        font-size: 0.75em;
+        display: inline-block;
+        margin-top: 5px;
+    }
+    .mcp-active {
+        background: rgba(46, 204, 113, 0.2);
+        color: #2ecc71;
+        border: 1px solid #2ecc71;
+    }
+    .mcp-inactive {
+        background: rgba(231, 76, 60, 0.2);
+        color: #e74c3c;
+        border: 1px solid #e74c3c;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -351,6 +456,28 @@ with st.sidebar:
     for tool in current_tools:
         st.markdown(f"- `{tool.__name__}()`")
     
+    # Show MCP status for weather agent
+    if st.session_state.current_agent == "weather":
+        st.markdown("---")
+        st.markdown("**📡 Data Source:**")
+        if _mcp_weather_client is not None:
+            st.markdown('<span class="mcp-status mcp-active">🟢 MCP Server Active</span>', unsafe_allow_html=True)
+            st.caption("Using Open-Meteo live data")
+        else:
+            st.markdown('<span class="mcp-status mcp-inactive">🔴 MCP Unavailable</span>', unsafe_allow_html=True)
+            st.caption("Using mock data fallback")
+    
+    # Show MCP status for stock agent
+    if st.session_state.current_agent == "stock":
+        st.markdown("---")
+        st.markdown("**📡 Data Source:**")
+        if _mcp_stock_client is not None:
+            st.markdown('<span class="mcp-status mcp-active">🟢 MCP Server Active</span>', unsafe_allow_html=True)
+            st.caption("Using Yahoo Finance live data")
+        else:
+            st.markdown('<span class="mcp-status mcp-inactive">🔴 MCP Unavailable</span>', unsafe_allow_html=True)
+            st.caption("Service unavailable")
+    
     st.markdown("---")
     
     # Clear chat button
@@ -361,7 +488,7 @@ with st.sidebar:
     # Footer
     st.markdown("---")
     st.caption("Built with Streamlit & OpenAI")
-    st.caption("v1.0.0")
+    st.caption("v1.1.0 - MCP Integration")
 
 # =============================================================================
 # Main Chat Interface
@@ -388,8 +515,8 @@ if not st.session_state.messages[st.session_state.current_agent]:
     with st.chat_message("assistant"):
         welcome_messages = {
             "ecommerce": "👋 Welcome to MegaStore! I'm **ShopBot**, your personal shopping assistant. I can help you:\n\n- 🔍 **Search products** in our catalog\n- 📦 **Track your orders** \n- 📋 **Get product details** and recommendations\n\nHow can I help you today?",
-            "stock": "📊 Welcome to TradePro Securities! I'm **FinanceBot**, your financial information assistant. I can help you:\n\n- 💹 **Get stock prices** and daily changes\n- 📈 **View market summaries** and indices\n- 📰 **Read financial news**\n\n*Disclaimer: Information provided is for educational purposes only and not financial advice.*\n\nWhat would you like to know?",
-            "weather": "🌤️ Hello! I'm **SkyWatch** from GlobalWeather Services. I can help you:\n\n- 🌡️ **Check weather forecasts** for any city\n- ⚠️ **View weather alerts** and warnings\n- 💨 **Check air quality** information\n\nWhich city's weather would you like to know about?"
+            "stock": "📊 Welcome to TradePro Securities! I'm **FinanceBot**, your financial information assistant. I can help you:\n\n- 💹 **Get stock prices** and daily changes\n- 📈 **View market summaries** and indices\n- 📰 **Read financial news**\n\n" + ("📡 *Live data from Yahoo Finance*" if _mcp_stock_client else "⚠️ *Stock data service unavailable*") + "\n\n*Disclaimer: Information provided is for educational purposes only and not financial advice.*\n\nWhat would you like to know?",
+            "weather": "🌤️ Hello! I'm **SkyWatch** from GlobalWeather Services. I can help you:\n\n- 🌡️ **Check weather forecasts** for any city (powered by Open-Meteo)\n- ⚠️ **View weather alerts** and warnings\n- 💨 **Check air quality** information\n\n" + ("📡 *Live data from MCP Weather Server*" if _mcp_weather_client else "📊 *Using simulated weather data*") + "\n\nWhich city's weather would you like to know about?"
         }
         st.markdown(welcome_messages.get(st.session_state.current_agent, "Hello! How can I help you?"))
 
@@ -432,6 +559,7 @@ st.markdown(
     <div class="footer">
         <p>🤖 <strong>Multi-Agent Hub</strong> | Currently chatting with {current_config['icon']} {current_config['name']}</p>
         <p>Powered by OpenAI GPT-4o-mini | Built with Streamlit</p>
+        <p style="font-size: 0.8em; color: #555;">Weather: {'MCP (Open-Meteo)' if _mcp_weather_client else 'Mock'} | Stock: {'MCP (Yahoo Finance)' if _mcp_stock_client else 'Unavailable'}</p>
     </div>
     """,
     unsafe_allow_html=True
